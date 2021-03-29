@@ -1,0 +1,7 @@
+[package]
+name = "regular"
+version = "0.1.0"
+authors = ["vizee <vizee@live.cn>"]
+edition = "2018"
+
+[dependencies]
