@@ -3,8 +3,6 @@ use std::mem;
 use std::ptr::NonNull;
 
 const LEVELS: usize = 9;
-const RAND_M: u64 = 1 << 16;
-const RAND_P: u64 = RAND_M * 25 / 100;
 
 #[derive(Debug)]
 pub struct PseudoRand {
@@ -127,15 +125,8 @@ impl Skiplist {
     }
 
     fn pick_level(&mut self) -> usize {
-        let mut level = 0;
-        while self.rnd.rand(RAND_M) < RAND_P {
-            level += 1;
-        }
-        if level < LEVELS {
-            level
-        } else {
-            0
-        }
+        assert!(LEVELS < 32);
+        (self.rnd.rand(1 << (LEVELS + LEVELS)).trailing_zeros() / 2) as usize
     }
 
     pub fn insert(&mut self, key: u64) -> bool {
