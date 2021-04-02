@@ -1,10 +1,9 @@
 package rbtree
 
 type Ord[T any] interface {
-	Cmp(T, T) int
+	type T
+	Cmp(T) int
 }
-
-type OrdFunc[T any] func(T, T) int
 
 type Comparable interface {
 	type int, int8, int16, int32, int64,
@@ -12,7 +11,9 @@ type Comparable interface {
 		float32, float64
 }
 
-func Compare[T Comparable](a T, b T) int {
+type Number[T Comparable] T
+
+func (a Number[T]) Cmp(b Number[T]) int {
 	if a == b {
 		return 0
 	} else if a < b {
@@ -22,26 +23,21 @@ func Compare[T Comparable](a T, b T) int {
 	}
 }
 
-func (cmp OrdFunc[T]) Cmp(a T, b T) int {
-	return cmp(a, b)
-}
-
-type Node[K any] struct {
+type Node[K Ord[K]] struct {
 	link   [2]*Node[K]
 	parent *Node[K]
 	k      K
 	red    bool
 }
 
-type Tree[K any, O Ord[K]] struct {
+type Tree[K Ord[K]] struct {
 	root *Node[K]
-	ord	 O
 }
 
-func (t *Tree[K, O]) searchNode(key K) *Node[K] {
+func (t *Tree[K]) searchNode(key K) *Node[K] {
 	n := t.root
 	for n != nil {
-		switch t.ord.Cmp(n.k, key) {
+		switch n.k.Cmp(key) {
 		case 1:
 			n = n.link[0]
 		case -1:
@@ -53,11 +49,11 @@ func (t *Tree[K, O]) searchNode(key K) *Node[K] {
 	return nil
 }
 
-func (t *Tree[K, O]) Search(key K) bool {
+func (t *Tree[K]) Search(key K) bool {
 	return t.searchNode(key) != nil
 }
 
-func (t *Tree[K, O]) fixInsert(n *Node[K]) {
+func (t *Tree[K]) fixInsert(n *Node[K]) {
 	for {
 		p := n.parent
 		if p == nil || !p.red {
@@ -117,14 +113,14 @@ func (t *Tree[K, O]) fixInsert(n *Node[K]) {
 	t.root.red = false
 }
 
-func (t *Tree[K, O]) Insert(key K) bool {
+func (t *Tree[K]) Insert(key K) bool {
 	var (
 		p   *Node[K]
 		dir int
 	)
 	n := t.root
 	for n != nil {
-		switch t.ord.Cmp(n.k, key) {
+		switch n.k.Cmp(key) {
 		case 1:
 			dir = 0
 		case -1:
@@ -150,7 +146,7 @@ func (t *Tree[K, O]) Insert(key K) bool {
 	return false
 }
 
-func (t *Tree[K, O]) fixDelete(p *Node[K], dir int, root *Node[K]) {
+func (t *Tree[K]) fixDelete(p *Node[K], dir int, root *Node[K]) {
 	for {
 		dir &= 1
 		sib := (1 - dir) & 1
@@ -240,7 +236,7 @@ func (t *Tree[K, O]) fixDelete(p *Node[K], dir int, root *Node[K]) {
 	}
 }
 
-func (t *Tree[K, O]) Delete(key K) bool {
+func (t *Tree[K]) Delete(key K) bool {
 	n := t.searchNode(key)
 	if n == nil {
 		return false
