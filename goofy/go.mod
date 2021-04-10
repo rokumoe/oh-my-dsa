@@ -1,3 +1,3 @@
-module oh-my-dsa/goofy
+module github.com/vizee/oh-my-dsa/goofy
 
 go 1.16
