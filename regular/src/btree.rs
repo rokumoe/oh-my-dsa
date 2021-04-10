@@ -288,7 +288,6 @@ mod tests {
         println!("{}", t.search(&50));
     }
 
-
     #[test]
     fn test_delete() {
         let mut t = BTree::new();
