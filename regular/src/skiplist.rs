@@ -1,212 +1,463 @@
+use std::borrow::{Borrow, Cow};
 use std::cmp::Ordering;
+use std::marker::PhantomData;
 use std::mem;
+use std::ops::{Bound, RangeBounds};
 use std::ptr::NonNull;
 
-const LEVELS: usize = 9;
+use crate::rand;
 
-#[derive(Debug)]
-pub struct PseudoRand {
-    s: u64,
+type NodePtr<K, V, const L: usize> = Option<NonNull<Node<K, V, L>>>;
+
+struct Node<K, V, const L: usize> {
+    next: [NodePtr<K, V, L>; L],
+    key: K,
+    value: V,
 }
 
-impl PseudoRand {
-    fn new(seed: u64) -> Self {
-        Self { s: seed }
-    }
-
-    fn rand(&mut self, n: u64) -> u64 {
-        let x = self.s.wrapping_mul(1103515245).wrapping_add(12345);
-        self.s = x;
-        x % n
-    }
-}
-
-#[derive(Debug)]
-struct Node {
-    key: u64,
-    forward: [Option<NonNull<Node>>; LEVELS],
-}
-
-impl Node {
-    fn new(key: u64, f: Option<NonNull<Node>>) -> Self {
+impl<K, V, const L: usize> Node<K, V, L> {
+    fn new(key: K, value: V) -> Self {
         Self {
             key,
-            forward: [f; LEVELS],
+            value,
+            next: [None; L],
         }
     }
 }
 
-#[derive(Debug)]
-pub struct Skiplist {
-    head: Node,
+pub struct Skiplist<K, V, const L: usize> {
+    head: [NodePtr<K, V, L>; L],
     level: usize,
-    sentinel: Option<NonNull<Node>>,
-    rnd: PseudoRand,
 }
 
-impl Drop for Skiplist {
+impl<K, V, const L: usize> Drop for Skiplist<K, V, L> {
     fn drop(&mut self) {
-        let mut p = self.head.forward[0];
-        while p != self.sentinel {
-            let n = unsafe { Box::from_raw(p.unwrap().as_ptr()) };
-            p = n.forward[0];
-        }
-        mem::drop(unsafe { Box::from_raw(self.sentinel.unwrap().as_ptr()) });
+        self.drain();
     }
 }
 
-impl Skiplist {
+impl<K, V, const L: usize> Skiplist<K, V, L> {
     pub fn new() -> Self {
-        let sentinel = NonNull::new(Box::into_raw(Box::new(Node::new(0, None))));
         Self {
-            head: Node::new(0, sentinel),
+            head: [None; L],
             level: 0,
-            sentinel,
-            rnd: PseudoRand::new(0),
         }
     }
 
-    pub fn search(&self, key: u64) -> bool {
-        let mut p = &self.head;
+    fn rand_level() -> usize {
+        assert!(L < 64);
+        (rand::random_u64() % (1u64 << L)).trailing_zeros() as usize
+    }
+
+    fn link_node(&mut self, preds: &mut [NodePtr<K, V, L>; L], node: NodePtr<K, V, L>) {
+        let mut new_level = Self::rand_level();
+        if new_level > self.level {
+            new_level = self.level + 1;
+            self.level = new_level;
+            preds[new_level] = None;
+        }
+        let curr = unsafe { node.unwrap().as_mut() };
+        for k in 0..=new_level {
+            if let Some(mut p) = preds[k] {
+                let pred = unsafe { p.as_mut() };
+                curr.next[k] = pred.next[k];
+                pred.next[k] = node;
+            } else {
+                curr.next[k] = self.head[k];
+                self.head[k] = node;
+            }
+        }
+    }
+
+    fn shrink_level(&mut self) {
         let mut k = self.level;
-        loop {
-            loop {
-                if p.forward[k] == self.sentinel {
+        while k > 0 && self.head[k].is_none() {
+            k -= 1;
+        }
+        self.level = k;
+    }
+
+    fn remove_node(&mut self, preds: &[NodePtr<K, V, L>; L], node: NodePtr<K, V, L>) {
+        let curr = unsafe { node.unwrap().as_ref() };
+        for k in 0..=self.level {
+            if let Some(mut p) = preds[k] {
+                let pred = unsafe { p.as_mut() };
+                if pred.next[k] == node {
+                    pred.next[k] = curr.next[k];
+                } else {
                     break;
                 }
-                let q = unsafe { &*p.forward[k].unwrap().as_ptr() };
-                match q.key.cmp(&key) {
-                    Ordering::Less => p = q,
-                    Ordering::Equal => return true,
-                    Ordering::Greater => break,
-                }
-            }
-            if k == 0 {
+            } else if self.head[k] == node {
+                self.head[k] = curr.next[k];
+            } else {
                 break;
             }
-            k -= 1;
         }
-        false
+        self.shrink_level();
     }
 
-    fn locate(
-        &self,
-        key: u64,
-        update: &mut [Option<NonNull<Node>>; LEVELS],
-    ) -> Option<NonNull<Node>> {
-        let mut p = &self.head;
-        let mut k = self.level;
-        let mut found = false;
-        let mut q = None;
-        loop {
-            while p.forward[k] != self.sentinel {
-                q = p.forward[k];
-                let x = unsafe { &*q.unwrap().as_ptr() };
-                match x.key.cmp(&key) {
-                    Ordering::Less => p = x,
-                    Ordering::Equal => {
-                        found = true;
-                        break;
+    pub fn drain(&mut self) -> Drain<K, V, L> {
+        let p = self.head[0].take();
+        self.level = 0;
+        Drain { curr: p }
+    }
+}
+
+impl<K, V, const L: usize> Skiplist<K, V, L>
+where
+    K: Ord,
+{
+    fn search_node<Q: ?Sized>(&self, key: &Q) -> Result<NodePtr<K, V, L>, NodePtr<K, V, L>>
+    where
+        Q: Ord,
+        K: Borrow<Q>,
+    {
+        let mut prev = None;
+        let mut link = &self.head;
+        for k in (0..=self.level).rev() {
+            while let Some(n) = link[k] {
+                let curr = unsafe { n.as_ref() };
+                match curr.key.borrow().cmp(key) {
+                    Ordering::Less => {
+                        prev = Some(n);
+                        link = &curr.next;
                     }
+                    Ordering::Equal => return Ok(Some(n)),
                     Ordering::Greater => break,
                 }
             }
-            update[k] = NonNull::new(p as *const _ as *mut _);
-            if k == 0 {
-                break;
-            }
-            k -= 1;
         }
-        if found {
-            q
+        Err(prev)
+    }
+
+    fn search_preds<Q: ?Sized>(
+        &self,
+        key: &Q,
+        preds: &mut [NodePtr<K, V, L>; L],
+        exclude: bool,
+    ) -> NodePtr<K, V, L>
+    where
+        Q: Ord,
+        K: Borrow<Q>,
+    {
+        let mut prev = None;
+        let mut found = None;
+        let mut next = &self.head;
+        for k in (0..=self.level).rev() {
+            while let Some(n) = next[k] {
+                let curr = unsafe { n.as_ref() };
+                match curr.key.borrow().cmp(&key) {
+                    Ordering::Greater => break,
+                    Ordering::Equal if !exclude => {
+                        found = Some(n);
+                        break;
+                    }
+                    _ => {
+                        prev = Some(n);
+                        next = &curr.next;
+                    }
+                }
+            }
+            preds[k] = prev;
+        }
+        found
+    }
+
+    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        Q: Ord,
+        K: Borrow<Q>,
+    {
+        if let Ok(Some(n)) = self.search_node(key) {
+            Some(unsafe { &n.as_ref().value })
         } else {
             None
         }
     }
 
-    fn pick_level(&mut self) -> usize {
-        assert!(LEVELS < 32);
-        (self.rnd.rand(1 << (LEVELS + LEVELS)).trailing_zeros() / 2) as usize
+    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        Q: Ord,
+        K: Borrow<Q>,
+    {
+        if let Ok(Some(mut p)) = self.search_node(key) {
+            Some(unsafe { &mut p.as_mut().value })
+        } else {
+            None
+        }
     }
 
-    pub fn insert(&mut self, key: u64) -> bool {
-        let mut update = [None; LEVELS];
-        let found = self.locate(key, &mut update);
-        if found.is_some() {
-            return true;
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let mut preds = [None; L];
+        let found = self.search_preds(&key, &mut preds, false);
+        if let Some(mut n) = found {
+            Some(mem::replace(&mut unsafe { n.as_mut() }.value, value))
+        } else {
+            self.link_node(
+                &mut preds,
+                NonNull::new(Box::into_raw(Box::new(Node::new(key, value)))),
+            );
+            None
         }
-        let mut k = self.pick_level();
-        if k > self.level {
-            k = self.level + 1;
-            self.level = k;
-            update[k] = NonNull::new(&mut self.head as *mut _);
+    }
+
+    pub fn insert_cow(&mut self, key: Cow<K>, value: V) -> Option<V>
+    where
+        K: ToOwned<Owned = K>,
+    {
+        let mut preds = [None; L];
+        let found = self.search_preds(key.borrow(), &mut preds, false);
+        if let Some(mut n) = found {
+            Some(mem::replace(&mut unsafe { n.as_mut() }.value, value))
+        } else {
+            self.link_node(
+                &mut preds,
+                NonNull::new(Box::into_raw(Box::new(Node::new(key.into_owned(), value)))),
+            );
+            None
         }
-        let mut x = Box::new(Node::new(key, None));
-        let q = NonNull::new(x.as_mut() as *mut _);
-        loop {
-            let p = unsafe { &mut *update[k].unwrap().as_ptr() };
-            x.forward[k] = p.forward[k];
-            p.forward[k] = q;
-            if k == 0 {
-                break;
+    }
+
+    pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
+    where
+        Q: Ord,
+        K: Borrow<Q>,
+    {
+        let mut preds = [None; L];
+        self.search_preds(&key, &mut preds, false).map(|found| {
+            self.remove_node(&preds, Some(found));
+            unsafe { Box::from_raw(found.as_ptr()) }.value
+        })
+    }
+
+    fn range_bound_ptr<T: ?Sized, R>(&self, range: R) -> RangePtr<K, V, L>
+    where
+        T: Ord,
+        K: Borrow<T>,
+        R: RangeBounds<T>,
+    {
+        if !check_range(&range) {
+            return RangePtr {
+                curr: None,
+                end: None,
+            };
+        }
+        let start_bound = range.start_bound();
+        let start = match start_bound {
+            Bound::Included(key) | Bound::Excluded(key) => {
+                let (found, mut p) = self
+                    .search_node(key)
+                    .map_or_else(|e| (false, e), |n| (true, n));
+                if matches!(start_bound, Bound::Excluded(_)) || !found {
+                    if let Some(n) = p {
+                        p = unsafe { n.as_ref() }.next[0];
+                    }
+                }
+                p
             }
-            k -= 1;
-        }
-        mem::forget(x);
-        false
+            Bound::Unbounded => self.head[0],
+        };
+        let end_bound = range.end_bound();
+        let end = match end_bound {
+            Bound::Included(key) | Bound::Excluded(key) => {
+                let (found, mut p) = self
+                    .search_node(key)
+                    .map_or_else(|e| (false, e), |n| (true, n));
+                if matches!(end_bound, Bound::Included(_)) || !found {
+                    if let Some(n) = p {
+                        p = unsafe { n.as_ref() }.next[0];
+                    }
+                }
+                p
+            }
+            Bound::Unbounded => None,
+        };
+        RangePtr { curr: start, end }
     }
 
-    pub fn remove(&mut self, key: u64) -> bool {
-        let mut update = [None; LEVELS];
-        let found = self.locate(key, &mut update);
-        if found.is_none() {
-            return false;
+    pub fn range<T: ?Sized, R>(&self, range: R) -> Range<'_, K, V, L>
+    where
+        T: Ord,
+        K: Borrow<T>,
+        R: RangeBounds<T>,
+    {
+        Range {
+            inner: self.range_bound_ptr(range),
+            _marker: PhantomData,
         }
-        let q = unsafe { Box::from_raw(found.unwrap().as_ptr()) };
+    }
+
+    pub fn range_mut<T: ?Sized, R>(&self, range: R) -> RangeMut<'_, K, V, L>
+    where
+        T: Ord,
+        K: Borrow<T>,
+        R: RangeBounds<T>,
+    {
+        RangeMut {
+            inner: self.range_bound_ptr(range),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn drain_range<T: ?Sized, R>(&mut self, range: R) -> Drain<K, V, L>
+    where
+        T: Ord,
+        K: Borrow<T>,
+        R: RangeBounds<T>,
+    {
+        if !check_range(&range) {
+            return Drain { curr: None };
+        }
+
+        let start_bound = range.start_bound();
+        let mut start_preds = [None; L];
+        let start = match start_bound {
+            Bound::Included(key) | Bound::Excluded(key) => {
+                let p = self.search_preds(
+                    key,
+                    &mut start_preds,
+                    matches!(start_bound, Bound::Excluded(_)),
+                );
+                if p.is_none() {
+                    start_preds[0].and_then(|n| unsafe { n.as_ref().next[0] })
+                } else {
+                    p
+                }
+            }
+            Bound::Unbounded => None,
+        };
+
+        let end_bound = range.end_bound();
+        let mut end_preds = [None; L];
+        let end = match end_bound {
+            Bound::Included(key) | Bound::Excluded(key) => {
+                let p =
+                    self.search_preds(key, &mut end_preds, matches!(end_bound, Bound::Included(_)));
+                if p.is_none() {
+                    end_preds[0].and_then(|n| unsafe { n.as_ref().next[0] })
+                } else {
+                    p
+                }
+            }
+            Bound::Unbounded => None,
+        };
+
+        if start == None && end == None {
+            return self.drain();
+        }
+
         for k in 0..=self.level {
-            let p = unsafe { &mut *update[k].unwrap().as_ptr() };
-            if p.forward[k] != found {
-                break;
+            let next = end_preds[k].and_then(|mut n| unsafe { n.as_mut().next[k].take() });
+            if let Some(mut n) = start_preds[k] {
+                unsafe { n.as_mut().next[k] = next };
+            } else {
+                self.head[k] = next;
             }
-            p.forward[k] = q.forward[k];
         }
-        let mut k = self.level;
-        while self.head.forward[k] == self.sentinel && k > 0 {
-            k -= 1;
-        }
-        self.level = k;
-        true
+        self.shrink_level();
+
+        Drain { curr: start }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+struct RangePtr<K, V, const L: usize> {
+    curr: NodePtr<K, V, L>,
+    end: NodePtr<K, V, L>,
+}
 
-    #[test]
-    fn test_insert() {
-        let mut sl = Skiplist::new();
-        sl.insert(1);
-        sl.insert(4);
-        sl.insert(2);
-        sl.insert(3);
-        assert!(!sl.search(0));
-        assert!(sl.search(1));
-        assert!(sl.search(4));
-        assert!(!sl.search(5));
+impl<K, V, const L: usize> RangePtr<K, V, L> {
+    fn next_ptr(&mut self) -> NodePtr<K, V, L> {
+        if self.curr != self.end {
+            if let Some(n) = self.curr {
+                let curr = unsafe { n.as_ref() };
+                self.curr = curr.next[0];
+                return Some(n);
+            }
+        }
+        None
     }
+}
 
-    #[test]
-    fn test_remove() {
-        let mut sl = Skiplist::new();
-        sl.insert(1);
-        sl.insert(4);
-        sl.insert(2);
-        sl.insert(3);
-        assert!(sl.remove(1));
-        assert!(sl.remove(4));
-        assert!(sl.remove(2));
-        assert!(sl.remove(3));
-        assert!(!sl.remove(1));
+pub struct Range<'a, K, V, const L: usize> {
+    inner: RangePtr<K, V, L>,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, K: 'a, V: 'a, const L: usize> Iterator for Range<'a, K, V, L> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next_ptr().map(|n| {
+            let curr = unsafe { n.as_ref() };
+            (&curr.key, &curr.value)
+        })
+    }
+}
+
+pub struct RangeMut<'a, K, V, const L: usize> {
+    inner: RangePtr<K, V, L>,
+    _marker: PhantomData<&'a mut ()>,
+}
+
+impl<'a, K: 'a, V: 'a, const L: usize> Iterator for RangeMut<'a, K, V, L> {
+    type Item = (&'a K, &'a mut V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next_ptr().map(|mut n| {
+            let curr = unsafe { n.as_mut() };
+            (&curr.key, &mut curr.value)
+        })
+    }
+}
+
+pub struct Drain<K, V, const L: usize> {
+    curr: NodePtr<K, V, L>,
+}
+
+impl<K, V, const L: usize> Iterator for Drain<K, V, L> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(n) = self.curr {
+            let curr_node = unsafe { Box::from_raw(n.as_ptr()) };
+            self.curr = curr_node.next[0];
+            Some((curr_node.key, curr_node.value))
+        } else {
+            None
+        }
+    }
+}
+
+impl<K, V, const L: usize> Drop for Drain<K, V, L> {
+    fn drop(&mut self) {
+        let mut curr = self.curr;
+        while let Some(n) = curr {
+            let curr_node = unsafe { Box::from_raw(n.as_ptr()) };
+            curr = curr_node.next[0];
+        }
+    }
+}
+
+fn check_range<T: ?Sized, R>(range: &R) -> bool
+where
+    T: Ord,
+    R: RangeBounds<T>,
+{
+    let start = range.start_bound();
+    let end = range.end_bound();
+    if start == end {
+        return true;
+    }
+    let start_key = match start {
+        Bound::Included(key) | Bound::Excluded(key) => key,
+        Bound::Unbounded => return true,
+    };
+    let end_key = match end {
+        Bound::Included(key) | Bound::Excluded(key) => key,
+        Bound::Unbounded => return true,
+    };
+    match start_key.cmp(&end_key) {
+        Ordering::Equal => matches!(start, Bound::Excluded(_)) || matches!(end, Bound::Included(_)),
+        r => r.is_le(),
     }
 }
