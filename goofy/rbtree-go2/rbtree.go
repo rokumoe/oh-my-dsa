@@ -1,59 +1,71 @@
 package rbtree
 
-type Ord[T any] interface {
-	type T
-	Cmp(T) int
+type Optional[T any] struct {
+	v    T
+	some bool
 }
 
-type Comparable interface {
-	type int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64, uintptr,
-		float32, float64
+func (o *Optional[T]) IsSome() bool {
+	return o.some
 }
 
-type Number[T Comparable] T
-
-func (a Number[T]) Cmp(b Number[T]) int {
-	if a == b {
-		return 0
-	} else if a < b {
-		return -1
+func (o *Optional[T]) Unwrap() T {
+	if o.some {
+		return o.v
 	} else {
-		return 1
+		panic(`unwrap none`)
 	}
 }
 
-type Node[K Ord[K]] struct {
-	link   [2]*Node[K]
-	parent *Node[K]
+func None[T any]() Optional[T] {
+	return Optional[T]{}
+}
+
+func Some[T any](v T) Optional[T] {
+	return Optional[T]{some: true, v: v}
+}
+
+type Node[K, V any] struct {
+	link   [2]*Node[K, V]
+	parent *Node[K, V]
 	k      K
+	v      V
 	red    bool
 }
 
-type Tree[K Ord[K]] struct {
-	root *Node[K]
+type Compare[K any] func(a, b K) int
+
+type RBTree[K, V any] struct {
+	root *Node[K, V]
+	Cmp  Compare[K]
 }
 
-func (t *Tree[K]) searchNode(key K) *Node[K] {
+func (t *RBTree[K, V]) searchNode(key K) *Node[K, V] {
 	n := t.root
 	for n != nil {
-		switch n.k.Cmp(key) {
-		case 1:
+		ord := t.Cmp(n.k, key)
+		switch {
+		case ord > 0:
 			n = n.link[0]
-		case -1:
+		case ord < 0:
 			n = n.link[1]
-		case 0:
+		default:
 			return n
 		}
 	}
 	return nil
 }
 
-func (t *Tree[K]) Search(key K) bool {
-	return t.searchNode(key) != nil
+func (t *RBTree[K, V]) Search(key K) Optional[V] {
+	n := t.searchNode(key)
+	if n != nil {
+		return Some(n.v)
+	} else {
+		return None[V]()
+	}
 }
 
-func (t *Tree[K]) fixInsert(n *Node[K]) {
+func (t *RBTree[K, V]) fixInsert(n *Node[K, V]) {
 	for {
 		p := n.parent
 		if p == nil || !p.red {
@@ -113,28 +125,32 @@ func (t *Tree[K]) fixInsert(n *Node[K]) {
 	t.root.red = false
 }
 
-func (t *Tree[K]) Insert(key K) bool {
+func (t *RBTree[K, V]) Insert(key K, value V) Optional[V] {
 	var (
-		p   *Node[K]
+		p   *Node[K, V]
 		dir int
 	)
 	n := t.root
 	for n != nil {
-		switch n.k.Cmp(key) {
-		case 1:
+		ord := t.Cmp(n.k, key)
+		switch {
+		case ord > 0:
 			dir = 0
-		case -1:
+		case ord < 0:
 			dir = 1
-		case 0:
-			return true
+		default:
+			old := n.v
+			n.v = value
+			return Some(old)
 		}
 
 		p = n
 		n = n.link[dir&1]
 	}
-	n = &Node[K]{
+	n = &Node[K, V]{
 		parent: p,
 		k:      key,
+		v:      value,
 		red:    true,
 	}
 	if p != nil {
@@ -143,10 +159,10 @@ func (t *Tree[K]) Insert(key K) bool {
 		t.root = n
 	}
 	t.fixInsert(n)
-	return false
+	return None[V]()
 }
 
-func (t *Tree[K]) fixDelete(p *Node[K], dir int, root *Node[K]) {
+func (t *RBTree[K, V]) fixDelete(p *Node[K, V], dir int, root *Node[K, V]) {
 	for {
 		dir &= 1
 		sib := (1 - dir) & 1
@@ -236,13 +252,13 @@ func (t *Tree[K]) fixDelete(p *Node[K], dir int, root *Node[K]) {
 	}
 }
 
-func (t *Tree[K]) Delete(key K) bool {
+func (t *RBTree[K, V]) Delete(key K) Optional[V] {
 	n := t.searchNode(key)
 	if n == nil {
-		return false
+		return None[V]()
 	}
 
-	root := Node[K]{link: [2]*Node[K]{0: t.root}}
+	root := Node[K, V]{link: [2]*Node[K, V]{0: t.root}}
 	p := n.parent
 	dir := 0
 	if p == nil {
@@ -307,5 +323,5 @@ func (t *Tree[K]) Delete(key K) bool {
 
 	t.root = root.link[0]
 
-	return true
+	return Some(n.v)
 }

@@ -11,11 +11,11 @@ func init() {
 }
 
 func TestInsert(t *testing.T) {
-	tr := &Tree[Number[int]]{}
+	tr := &RBTree[int, int]{Cmp: func(a, b int) int { return a - b }}
 	for i := 0; i < 100; i++ {
 		n := rand.Int() % 100
 		t.Log("> insert", n)
-		t.Log(tr.Insert(Number[int](n)))
+		t.Log(tr.Insert(n, i))
 	}
 }
 
@@ -24,12 +24,13 @@ func TestDelete(t *testing.T) {
 	for i := range nums {
 		nums[i] = rand.Int() % 100
 	}
-	tr := &Tree[Number[int]]{}
-	for _, n := range nums {
-		t.Log("> insert", n, tr.Insert(Number[int](n)))
+	tr := &RBTree[int, int]{Cmp: func(a, b int) int { return a - b }}
+	for i, n := range nums {
+		t.Log("> insert", n, tr.Insert(n, i))
 	}
 	for _, n := range nums {
 		t.Log("> delete", n)
-		t.Log(tr.Delete(Number[int](n)))
+		t.Log(tr.Delete(n))
 	}
+	t.Log("root nil", tr.root == nil)
 }
