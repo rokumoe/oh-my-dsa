@@ -127,8 +127,8 @@ impl paxospb::acceptor_server::Acceptor for Acceptor {
         }
 
         self.persist.store_acceptor_ballot(prepare.ballot_num)?;
-
         inner.max_seen_ballot = prepare.ballot_num;
+
         if let Some(ref accepted) = inner.accepted {
             Ok(Response::new(paxospb::Promise {
                 ok: true,
@@ -157,13 +157,13 @@ impl paxospb::acceptor_server::Acceptor for Acceptor {
         }
 
         self.persist.store_acceptor_ballot(propose.ballot_num)?;
+        inner.max_seen_ballot = propose.ballot_num;
+
         let state = Some(Promised {
             ballot_num: propose.ballot_num,
             value: Bytes::from(propose.value),
         });
         self.persist.store_acceptor_state(&state)?;
-
-        inner.max_seen_ballot = propose.ballot_num;
         inner.accepted = state;
 
         Ok(Response::new(paxospb::Accept { ok: true }))
