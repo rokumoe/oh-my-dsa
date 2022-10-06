@@ -233,6 +233,7 @@ impl Proposer {
                     .await;
             });
         }
+        drop(tx);
 
         let majority = n / 2 + 1;
 
@@ -294,6 +295,7 @@ impl Proposer {
                 let _ = tx.send(paxospb::Accept { ok: false }).await;
             });
         }
+        drop(tx);
 
         let majority = n / 2 + 1;
 
